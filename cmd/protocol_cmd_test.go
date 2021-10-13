@@ -23,7 +23,7 @@ func TestProtocol(t *testing.T) {
 
 		}).
 		Build(ctx)
-	require.NoError(t, node.Chain().ChainReader.Load(ctx))
+	require.NoError(t, node.Chain().ChainStore.Load(ctx))
 
 	// Run the command API.
 	cmd, stop := test.RunNodeAPI(ctx, node, t)

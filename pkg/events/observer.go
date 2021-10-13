@@ -14,8 +14,6 @@ import (
 	"github.com/filecoin-project/venus/pkg/types"
 )
 
-var ObserveDuration = time.Second * 45
-
 type observer struct {
 	api IEvent
 
@@ -29,6 +27,8 @@ type observer struct {
 	observers []TipSetObserver
 }
 
+var ObserveDuration = time.Second * 45
+
 func newObserver(api *cache, gcConfidence abi.ChainEpoch) *observer {
 	obs := &observer{
 		api:          api,
@@ -37,7 +37,7 @@ func newObserver(api *cache, gcConfidence abi.ChainEpoch) *observer {
 		ready:     make(chan struct{}),
 		observers: []TipSetObserver{},
 	}
-	//obs.Observe(api.observer()) todo has ignore cache
+	// obs.Observe(api.observer()) todo has ignore cache
 	return obs
 }
 

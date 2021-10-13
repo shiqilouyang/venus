@@ -40,7 +40,7 @@ func (sa *syncerAPI) Concurrent(ctx context.Context) int64 {
 
 // ChainTipSetWeight computes weight for the specified tipset.
 func (sa *syncerAPI) ChainTipSetWeight(ctx context.Context, tsk types.TipSetKey) (big.Int, error) {
-	ts, err := sa.syncer.ChainModule.ChainReader.GetTipSet(tsk)
+	ts, err := sa.syncer.ChainModule.ChainStore.GetTipSet(tsk)
 	if err != nil {
 		return big.Int{}, err
 	}
@@ -57,7 +57,7 @@ func (sa *syncerAPI) ChainSyncHandleNewTipSet(ctx context.Context, ci *types.Cha
 func (sa *syncerAPI) SyncSubmitBlock(ctx context.Context, blk *types.BlockMsg) error {
 	//todo many dot. how to get directly
 	chainModule := sa.syncer.ChainModule
-	parent, err := chainModule.ChainReader.GetBlock(ctx, blk.Header.Parents.Cids()[0])
+	parent, err := chainModule.ChainStore.GetBlock(ctx, blk.Header.Parents.Cids()[0])
 	if err != nil {
 		return xerrors.Errorf("loading parent block: %v", err)
 	}
@@ -92,7 +92,7 @@ func (sa *syncerAPI) SyncSubmitBlock(ctx context.Context, blk *types.BlockMsg) e
 		return xerrors.Errorf("somehow failed to make a tipset out of a single block: %v", err)
 	}
 
-	if _, err := chainModule.ChainReader.PutObject(ctx, blk.Header); err != nil {
+	if _, err := chainModule.ChainStore.PutObject(ctx, blk.Header); err != nil {
 		return err
 	}
 	localPeer := sa.syncer.NetworkModule.Network.GetPeerID()
@@ -126,11 +126,11 @@ func (sa *syncerAPI) SyncSubmitBlock(ctx context.Context, blk *types.BlockMsg) e
 // tipset.
 func (sa *syncerAPI) StateCall(ctx context.Context, msg *types.UnsignedMessage, tsk types.TipSetKey) (*types.InvocResult, error) {
 	start := time.Now()
-	ts, err := sa.syncer.ChainModule.ChainReader.GetTipSet(tsk)
+	ts, err := sa.syncer.ChainModule.ChainStore.GetTipSet(tsk)
 	if err != nil {
 		return nil, xerrors.Errorf("loading tipset %s: %v", tsk, err)
 	}
-	ret, err := sa.syncer.Consensus.Call(ctx, msg, ts)
+	ret, err := sa.syncer.Stmgr.Call(ctx, msg, ts)
 	if err != nil {
 		return nil, err
 	}

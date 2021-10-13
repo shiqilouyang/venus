@@ -3,6 +3,7 @@ package chain
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"io"
 	"os"
 	"runtime/debug"
@@ -92,7 +93,7 @@ type HeadChange struct {
 // CheckPoint is the key which the check-point written in the datastore.
 var CheckPoint = datastore.NewKey("/chain/checkPoint")
 
-//TSState export this func is just for gen cbor tool to work
+// TSState export this func is just for gen cbor tool to work
 type TSState struct {
 	StateRoot cid.Cid
 	Receipts  cid.Cid
@@ -166,7 +167,7 @@ func NewStore(chainDs repo.Datastore,
 		reorgNotifeeCh: make(chan ReorgNotifee),
 		tsCache:        tsCache,
 	}
-	//todo cycle reference , may think a better idea
+	// todo cycle reference , may think a better idea
 	store.tipIndex = NewTipStateCache(store)
 	store.chainIndex = NewChainIndex(store.GetTipSet)
 	store.circulatingSupplyCalculator = circulatiingSupplyCalculator
@@ -175,7 +176,7 @@ func NewStore(chainDs repo.Datastore,
 	if err != nil {
 		store.checkPoint = types.NewTipSetKey(genesisCid)
 	} else {
-		_ = store.checkPoint.UnmarshalCBOR(bytes.NewReader(val)) //nolint:staticcheck
+		_ = store.checkPoint.UnmarshalCBOR(bytes.NewReader(val)) // nolint:staticcheck
 	}
 	log.Infof("check point value: %v", store.checkPoint)
 
@@ -183,39 +184,83 @@ func NewStore(chainDs repo.Datastore,
 	return store
 }
 
-// Load rebuilds the Store's caches by traversing backwards from the
-// most recent best head as stored in its datastore.  Because Load uses a
-// content addressed datastore it guarantees that parent blocks are correctly
-// resolved from the datastore.  Furthermore Load ensures that all tipsets
-// references correctly have the same parent height, weight and parent set.
-// However, Load DOES NOT validate state transitions, it assumes that the
-// tipset were only Put to the Store after checking for valid transitions.
-//
-// Furthermore Load trusts that the Store's backing datastore correctly
-// preserves the cids of the heaviest tipset under the "HeadKey" datastore key.
-// If the HeadKey cids are tampered with and invalid blocks added to the datastore
-// then Load could be tricked into loading an invalid chain. Load will error if the
-// head does not link back to the expected genesis block, or the Store's
-// datastore does not store a link in the chain.  In case of error the caller
-// should not consider the chain useable and propagate the error.
-func (store *Store) Load(ctx context.Context) (err error) {
-	ctx, span := trace.StartSpan(ctx, "Store.Load")
-	defer tracing.AddErrorEndSpan(ctx, span, &err)
-
-	headTSKey, err := store.loadHead()
+func (store *Store) rollbackToTipset(key types.TipSetKey) error {
+	var target, err = store.GetTipSet(key)
 	if err != nil {
 		return err
 	}
 
-	headTS, err := LoadTipSetBlocks(ctx, store, headTSKey)
-	if err != nil {
-		return errors.Wrap(err, "error loading head tipset")
+	log.Infof("rollback chain head to tipset:%s, %d", target.String(), target.Height())
+
+	var head *types.TipSet
+
+	if head, err = store.loadHead(); err != nil {
+		return err
+	}
+
+	if head.Height() < target.Height() {
+		return fmt.Errorf("can't rollback to a tipset(%d) higher than chain head(%d)",
+			target.Height(), head.Height())
+	}
+
+	var toRemoveTS = make([]*types.TipSet, 0, int(head.Height()-target.Height()))
+
+	for !head.Equals(target) && head.Height() > target.Height() {
+		toRemoveTS = append(toRemoveTS, head)
+		if head, err = store.GetTipSet(head.Parents()); err != nil {
+			return err
+		}
+	}
+
+	if !head.Equals(target) {
+		return fmt.Errorf("target(%s) is not on main path", key.String())
+	}
+
+	for _, ts := range toRemoveTS {
+		_ = store.DeleteTipSetMetadata(ts)
+	}
+
+	return store.SetHead(context.TODO(), head)
+
+}
+
+func (store *Store) Load(ctx context.Context) (err error) {
+	ctx, span := trace.StartSpan(ctx, "Store.Load")
+	defer tracing.AddErrorEndSpan(ctx, span, &err)
+
+	var headTS *types.TipSet
+
+	if vch := os.Getenv("VENUS_CHAIN_HEAD"); len(vch) != 0 {
+		var headKey types.TipSetKey
+		log.Infof("load chain head from  environment 'VENUS_CHAIN_HEAD'")
+		if err = headKey.UnmarshalJSON([]byte(vch)); err != nil {
+			log.Warnf("can't unmarshal environment tipsetkey:%s", vch)
+			headKey = types.EmptyTSK
+		}
+		if err = store.rollbackToTipset(headKey); err != nil {
+			return xerrors.Errorf("rollback to tipset(%s) failed:%v", headKey.String(), err)
+		}
+	}
+
+	if headTS, err = store.loadHead(); err != nil {
+		return err
+	}
+
+	// if venus process is terminated ungracefully,
+	// the chain head state may not be computed and stored,
+	// but it's sure that it's parent state is stored..
+	if headTS.Height() > abi.ChainEpoch(0) {
+		var meta *TipSetMetadata
+		if meta, err = store.LoadTipsetMetadata(headTS); err != nil || meta == nil {
+			if headTS, err = store.GetTipSet(headTS.Parents()); err != nil {
+				return err
+			}
+		}
 	}
 
 	latestHeight := headTS.At(0).Height
 	loopBack := latestHeight - policy.ChainFinality
-	log.Infof("start loading chain at tipset: %s, height: %d", headTSKey.String(), latestHeight)
-
+	log.Infof("start loading chain at tipset: %s, height: %d", headTS.Key(), headTS.Height())
 	// Provide tipsets directly from the block store, not from the tipset index which is
 	// being rebuilt by this traversal.
 	tipsetProvider := TipSetProviderFromBlocks(ctx, store)
@@ -239,33 +284,32 @@ func (store *Store) Load(ctx context.Context) (err error) {
 			break
 		}
 	}
-
 	log.Infof("finished loading %d tipsets from %s", latestHeight, headTS.String())
 	// Set actual head.
 	return store.SetHead(ctx, headTS)
 }
 
 // loadHead loads the latest known head from disk.
-func (store *Store) loadHead() (types.TipSetKey, error) {
-	var emptyCidSet types.TipSetKey
+func (store *Store) loadHead() (*types.TipSet, error) {
 	tskBytes, err := store.ds.Get(HeadKey)
 	if err != nil {
-		return emptyCidSet, errors.Wrap(err, "failed to read HeadKey")
+		return nil, errors.Wrap(err, "failed to read HeadKey")
 	}
 
 	var tsk types.TipSetKey
 	err = tsk.UnmarshalCBOR(bytes.NewReader(tskBytes))
 	if err != nil {
-		return emptyCidSet, errors.Wrap(err, "failed to cast headCids")
+		return nil, errors.Wrap(err, "failed to cast headCids")
 	}
 
-	return tsk, nil
+	return store.GetTipSet(tsk)
 }
 
-//LoadTipsetMetadata load tipset status (state root and reciepts)
+// LoadTipsetMetadata load tipset status (state root and reciepts)
 func (store *Store) LoadTipsetMetadata(ts *types.TipSet) (*TipSetMetadata, error) {
 	h := ts.Height()
 	key := datastore.NewKey(makeKey(ts.String(), h))
+
 	tsStateBytes, err := store.ds.Get(key)
 	if err != nil {
 		return nil, errors.Wrapf(err, "failed to read tipset key %s", ts.String())
@@ -423,14 +467,18 @@ func (store *Store) GetTipSetReceiptsRoot(key *types.TipSet) (cid.Cid, error) {
 	return store.tipIndex.GetTipSetReceiptsRoot(key)
 }
 
+func (store *Store) GetTipsetMetadata(ts *types.TipSet) (*TipSetMetadata, error) {
+	return store.tipIndex.Get(ts)
+}
+
 // HasTipSetAndState returns true iff the default store's tipindex is indexing
 // the tipset identified by `key`.
 func (store *Store) HasTipSetAndState(ctx context.Context, ts *types.TipSet) bool {
 	return store.tipIndex.Has(ts)
 }
 
-//GetLatestBeaconEntry get latest beacon from the height. there're no beacon values in the block, try to
-//get beacon in the parents tipset. the max find depth is 20.
+// GetLatestBeaconEntry get latest beacon from the height. there're no beacon values in the block, try to
+// get beacon in the parents tipset. the max find depth is 20.
 func (store *Store) GetLatestBeaconEntry(ts *types.TipSet) (*types.BeaconEntry, error) {
 	cur := ts
 	for i := 0; i < 20; i++ {
@@ -512,7 +560,7 @@ func (store *Store) SetHead(ctx context.Context, newTS *types.TipSet) error {
 		return nil
 	}
 
-	//reorg tipset
+	// reorg tipset
 	dropped, added, update, err := func() ([]*types.TipSet, []*types.TipSet, bool, error) {
 		var dropped []*types.TipSet
 		var added []*types.TipSet
@@ -524,7 +572,7 @@ func (store *Store) SetHead(ctx context.Context, newTS *types.TipSet) error {
 			if store.head.Equals(newTS) {
 				return nil, nil, false, nil
 			}
-			//reorg
+			// reorg
 			oldHead := store.head
 			dropped, added, err = CollectTipsToCommonAncestor(ctx, store, oldHead, newTS)
 			if err != nil {
@@ -550,11 +598,11 @@ func (store *Store) SetHead(ctx context.Context, newTS *types.TipSet) error {
 		return nil
 	}
 
-	//todo wrap by go function
+	// todo wrap by go function
 	Reverse(added)
 	//Reverse(dropped)
 
-	//do reorg
+	// do reorg
 	store.reorgCh <- reorg{
 		old: dropped,
 		new: added,
@@ -679,7 +727,7 @@ func (store *Store) SubHeadChanges(ctx context.Context) chan []*HeadChange {
 	return out
 }
 
-//SubscribeHeadChanges subscribe head change event
+// SubscribeHeadChanges subscribe head change event
 func (store *Store) SubscribeHeadChanges(f ReorgNotifee) {
 	store.reorgNotifeeCh <- f
 }
@@ -724,13 +772,14 @@ func (store *Store) writeTipSetMetadata(tsm *TipSetMetadata) error {
 	// datastore keeps key:stateRoot (k,v) pairs.
 	h := tsm.TipSet.Height()
 	key := datastore.NewKey(makeKey(tsm.TipSet.String(), h))
+
 	return store.ds.Put(key, buf.Bytes())
 }
 
 // deleteTipSetMetadata delete the state root id from the datastore for the tipset key.
-func (store *Store) deleteTipSetMetadata(ts *types.TipSet) error { // nolint
+func (store *Store) DeleteTipSetMetadata(ts *types.TipSet) error { // nolint
+	store.tipIndex.Del(ts)
 	h := ts.Height()
-
 	key := datastore.NewKey(makeKey(ts.String(), h))
 	return store.ds.Delete(key)
 }
@@ -921,7 +970,8 @@ func (store *Store) WalkSnapshot(ctx context.Context, ts *types.TipSet, inclRece
 	return nil
 }
 
-//Import import a car file into local db
+// Import import a car file into local db
+// Import import a car file into local db
 func (store *Store) Import(r io.Reader) (*types.TipSet, error) {
 	header, err := car.LoadCar(store.bsstore, r)
 	if err != nil {
@@ -936,7 +986,6 @@ func (store *Store) Import(r io.Reader) (*types.TipSet, error) {
 	// Notice here is different with lotus, because the head tipset in lotus is not computed,
 	// but in venus the head tipset is computed, so here we will fallback a pre tipset
 	// and the chain store must has a metadata for each tipset, below code is to build the tipset metadata
-
 	// Todo What to do if it is less than 900
 	var (
 		loopBack  = 900
@@ -958,7 +1007,7 @@ func (store *Store) Import(r io.Reader) (*types.TipSet, error) {
 			break
 		}
 
-		//save fake root
+		// save fake root
 		err = store.PutTipSetMetadata(context.Background(), &TipSetMetadata{
 			TipSetStateRoot: curTipset.At(0).ParentStateRoot,
 			TipSet:          curParentTipset,
@@ -999,7 +1048,7 @@ func (store *Store) GetCirculatingSupplyDetailed(ctx context.Context, height abi
 	return store.circulatingSupplyCalculator.GetCirculatingSupplyDetailed(ctx, height, st)
 }
 
-//StateCirculatingSupply get circulate supply at specify epoch
+// StateCirculatingSupply get circulate supply at specify epoch
 func (store *Store) StateCirculatingSupply(ctx context.Context, tsk types.TipSetKey) (abi.TokenAmount, error) {
 	ts, err := store.GetTipSet(tsk)
 	if err != nil {
@@ -1234,8 +1283,6 @@ func (store *Store) GetLookbackTipSetForRound(ctx context.Context, ts *types.Tip
 	return lbts, nextTS.Blocks()[0].ParentStateRoot, nil
 }
 
-//Actor
-
 // LsActors returns a channel with actors from the latest state on the chain
 func (store *Store) LsActors(ctx context.Context) (map[address.Address]*types.Actor, error) {
 	st, err := store.GetTipSetState(ctx, store.head)
@@ -1287,7 +1334,7 @@ func (store *Store) LookupID(ctx context.Context, ts *types.TipSet, addr address
 }
 
 // ResolveToKeyAddr get key address of specify address.
-//if ths addr is bls/secpk address, return directly, other get the pubkey and generate address
+// if ths addr is bls/secpk address, return directly, other get the pubkey and generate address
 func (store *Store) ResolveToKeyAddr(ctx context.Context, ts *types.TipSet, addr address.Address) (address.Address, error) {
 	st, err := store.StateView(ts)
 	if err != nil {

@@ -64,7 +64,7 @@ type HelloProtocolHandler struct {
 	// for filling out our hello messages.
 	getHeaviestTipSet GetTipSetFunc
 
-	//helloTimeOut is block delay
+	// helloTimeOut is block delay
 	helloTimeOut time.Duration
 
 	peerMgr      fnet.IPeerMgr
@@ -157,7 +157,7 @@ func (h *HelloProtocolHandler) handleNewStream(s net.Stream) {
 
 	fullTipSet, err := h.loadLocalFullTipset(ctx, hello.HeaviestTipSetCids)
 	if err != nil {
-		fullTipSet, err = h.exchange.GetFullTipSet(ctx, []peer.ID{from}, hello.HeaviestTipSetCids) //nolint
+		fullTipSet, err = h.exchange.GetFullTipSet(ctx, []peer.ID{from}, hello.HeaviestTipSetCids) // nolint
 		if err == nil {
 			for _, b := range fullTipSet.Blocks {
 				_, err = h.chainStore.PutObject(ctx, b.Header)
@@ -176,6 +176,10 @@ func (h *HelloProtocolHandler) handleNewStream(s net.Stream) {
 	}
 	if err != nil {
 		log.Warnf("failed to get tipset message from peer %s", from)
+		return
+	}
+	if fullTipSet == nil {
+		log.Warnf("handleNewStream get null full tipset, it's scarce!")
 		return
 	}
 

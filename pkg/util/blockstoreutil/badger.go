@@ -23,16 +23,6 @@ var (
 	ErrBlockstoreClosed = fmt.Errorf("badger blockstore closed")
 )
 
-// aliases to mask badger dependencies.
-const (
-	// FileIO is equivalent to badger/options.FileIO.
-	FileIO = options.FileIO
-	// MemoryMap is equivalent to badger/options.MemoryMap.
-	MemoryMap = options.MemoryMap
-	// LoadToRAM is equivalent to badger/options.LoadToRAM.
-	LoadToRAM = options.LoadToRAM
-)
-
 // Options embeds the badger options themselves, and augments them with
 // blockstore-specific options.
 type Options struct {
@@ -76,8 +66,8 @@ func BadgerBlockstoreOptions(path string, readonly bool) (Options, error) {
 
 	// We mmap the index and the value logs; this is important to enable
 	// zero-copy value access.
-	opts.ValueLogLoadingMode = FileIO
-	opts.TableLoadingMode = FileIO
+	opts.ValueLogLoadingMode = options.FileIO
+	opts.TableLoadingMode = options.FileIO
 
 	// Embed only values < 128 bytes in the LSM tree; larger values are stored
 	// in value logs.
@@ -147,7 +137,7 @@ func Open(opts Options) (*BadgerBlockstore, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to open badger blockstore: %w", err)
 	}
-	cache := NewLruCache(1000 * 10000)
+	cache := NewLruCache(10 * 10000)
 	bs := &BadgerBlockstore{
 		DB:           db,
 		keyTransform: keyTransform,
@@ -240,8 +230,8 @@ func (b *BadgerBlockstore) Get(cid cid.Cid) (blocks.Block, error) {
 		}
 	}
 
-	//migrate
-	//todo just for test
+	// migrate
+	// todo just for test
 	var val []byte
 	err := b.DB.View(func(txn *badger.Txn) error {
 		switch item, err := txn.Get(key.Bytes()); err {
@@ -348,7 +338,7 @@ func (b *BadgerBlockstore) PutMany(blks []blocks.Block) error {
 	if err != nil {
 		err = fmt.Errorf("failed to put blocks in badger blockstore: %w", err)
 	}
-	//flush to cache
+	// flush to cache
 	for k, v := range flushToCache {
 		b.cache.Add(k, v)
 	}

@@ -62,8 +62,7 @@ type FSRepo struct {
 	walletDs Datastore
 	chainDs  Datastore
 	metaDs   Datastore
-	//marketDs  Datastore
-	paychDs Datastore
+	paychDs  Datastore
 	// lockfile is the file system lock to prevent others from opening the same repo.
 	lockfile io.Closer
 }
@@ -548,7 +547,7 @@ func initDataTransfer(p string) error {
 	if !os.IsNotExist(err) {
 		return err
 	}
-	//create data-transfer state
+	// create data-transfer state
 	return os.MkdirAll(dataTransferDir, 0777)
 }
 

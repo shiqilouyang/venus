@@ -26,14 +26,14 @@ type uncachedAPI interface {
 }
 
 type cache struct {
-	//*tipSetCache
+	// *tipSetCache
 	*messageCache
 	uncachedAPI
 }
 
 func newCache(api IEvent, gcConfidence abi.ChainEpoch) *cache {
 	return &cache{
-		//newTSCache(api, gcConfidence),
+		// newTSCache(api, gcConfidence),
 		newMessageCache(api),
 		api,
 	}

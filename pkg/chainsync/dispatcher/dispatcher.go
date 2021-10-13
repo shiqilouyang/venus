@@ -3,13 +3,13 @@ package dispatcher
 import (
 	"container/list"
 	"context"
+	"github.com/filecoin-project/venus/pkg/chainsync/types"
 	types2 "github.com/filecoin-project/venus/pkg/types"
+	"github.com/streadway/handy/atomic"
 	"runtime/debug"
 	"sync"
+	atmoic2 "sync/atomic"
 	"time"
-
-	"github.com/filecoin-project/venus/pkg/chainsync/types"
-	"github.com/streadway/handy/atomic"
 
 	logging "github.com/ipfs/go-log/v2"
 )
@@ -149,7 +149,7 @@ func (d *Dispatcher) processIncoming(ctx context.Context) {
 	}
 }
 
-//SetConcurrent set the max goroutine to syncing target
+// SetConcurrent set the max goroutine to syncing target
 func (d *Dispatcher) SetConcurrent(number int64) {
 	d.lk.Lock()
 	defer d.lk.Unlock()
@@ -167,22 +167,37 @@ func (d *Dispatcher) SetConcurrent(number int64) {
 	}
 }
 
-//Concurrent get current max syncing goroutine
+// Concurrent get current max syncing goroutine
 func (d *Dispatcher) Concurrent() int64 {
 	d.lk.Lock()
 	defer d.lk.Unlock()
 	return d.maxCount
 }
 
-//syncWorker  get sync target from work tracker periodically,
-//read all sync targets each time, and start synchronization
-func (d *Dispatcher) syncWorker(ctx context.Context) {
+func (d *Dispatcher) selectTarget(lastTarget *types.Target, ch <-chan struct{}) (*types.Target, bool) {
+exitFor:
+	for { // we are purpose to consume all notifies in channel
+		select {
+		case _, isok := <-ch:
+			if !isok {
+				return nil, false
+			}
+		default:
+			break exitFor
+		}
+	}
+	return d.workTracker.Select()
+}
+
+// deprecated, use 'syncworker'
+// nolint
+func (d *Dispatcher) syncWorkerStable(ctx context.Context) {
 	ticker := time.NewTicker(time.Millisecond * 500)
 	defer ticker.Stop()
 	for {
 		select {
 		case <-ticker.C:
-			for { //avoid to sleep a ticker， loop to get each target to run
+			for { // avoid to sleep a ticker， loop to get each target to run
 				syncTarget, popped := d.workTracker.Select()
 				if popped {
 					// Do work
@@ -211,6 +226,60 @@ func (d *Dispatcher) syncWorker(ctx context.Context) {
 
 		case <-ctx.Done():
 			log.Info("context done")
+			return
+		}
+	}
+}
+
+// nolint
+func (d *Dispatcher) syncWorker(ctx context.Context) {
+	defer func() {
+		log.Infof("dispatcher.syncworker exit.")
+	}()
+
+	const chKey = "sync-worker"
+	ch := d.workTracker.SubNewTarget(chKey, 20)
+	var unsolvedNotify = int64(0)
+	var lastTarget *types.Target
+	for {
+		select {
+		// must make sure, 'ch' is not blocked, or may cause syncing problems
+		case _, isok := <-ch:
+			if !isok {
+				break
+			}
+			if syncTarget, popped := d.selectTarget(lastTarget, ch); popped {
+				lastTarget = syncTarget
+				if d.conCurrent.Get() < d.maxCount {
+					atmoic2.StoreInt64(&unsolvedNotify, 0)
+					syncTarget.State = types.StateInSyncing
+					ctx, cancel := context.WithCancel(ctx)
+					d.cancelControler.PushBack(cancel)
+					d.conCurrent.Add(1)
+					go func() {
+						err := d.syncer.HandleNewTipSet(ctx, syncTarget)
+						if err != nil {
+							log.Infof("failed sync of %v at %d  %s", syncTarget.Head.Key(), syncTarget.Head.Height(), err)
+						}
+						d.workTracker.Remove(syncTarget)
+						d.registeredCb(syncTarget, err)
+						d.conCurrent.Add(-1)
+
+						// new 'target' notify may ignored, because of 'conCurrent' reaching 'maxCount',
+						// that means there is a new 'target' waiting for solving.
+						if atmoic2.LoadInt64(&unsolvedNotify) > 0 {
+							ch <- struct{}{}
+						}
+					}()
+				} else {
+					atmoic2.StoreInt64(&unsolvedNotify, 1)
+				}
+			}
+		case <-ctx.Done():
+			atmoic2.StoreInt64(&unsolvedNotify, 0)
+			d.workTracker.UnsubNewTarget(chKey)
+			ch = nil
+			log.Infof("context.done in dispatcher.syncworker.")
 			return
 		}
 	}

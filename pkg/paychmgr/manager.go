@@ -3,6 +3,7 @@ package paychmgr
 import (
 	"context"
 	"errors"
+	"github.com/filecoin-project/venus/pkg/repo"
 	"github.com/filecoin-project/venus/pkg/statemanger"
 	"github.com/filecoin-project/venus/pkg/types"
 	"sync"
@@ -82,6 +83,7 @@ type ManagerParams struct {
 	ChainInfoAPI IChainInfo
 	WalletAPI    IWalletAPI
 	SM           statemanger.IStateManager
+	DS           repo.Datastore
 }
 
 func NewManager(ctx context.Context, ds datastore.Batching, params *ManagerParams) (*Manager, error) {

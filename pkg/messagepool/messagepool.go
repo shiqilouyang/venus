@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/filecoin-project/venus/pkg/statemanger"
 	"math"
 	stdbig "math/big"
 	"os"
@@ -39,7 +40,6 @@ import (
 	"github.com/filecoin-project/venus/pkg/net/msgsub"
 	"github.com/filecoin-project/venus/pkg/repo"
 	"github.com/filecoin-project/venus/pkg/types"
-	"github.com/filecoin-project/venus/pkg/vm"
 	"github.com/filecoin-project/venus/pkg/vm/gas"
 )
 
@@ -130,18 +130,10 @@ func init() {
 	}
 }
 
-type gasPredictor interface {
-	CallWithGas(context.Context, *types.UnsignedMessage, []types.ChainMsg, *types.TipSet) (*vm.Ret, error)
-}
-
-type actorProvider interface {
-	// GetActorAt returns the actor state defined by the chain up to some tipset
-	GetActorAt(context.Context, *types.TipSet, address.Address) (*types.Actor, error)
-}
-
 type MessagePool struct {
 	lk sync.Mutex
 
+	sm *statemanger.Stmgr
 	ds repo.Datastore
 
 	addSema chan struct{}
@@ -195,8 +187,6 @@ type MessagePool struct {
 	forkParams       *config.ForkUpgradeConfig
 	gasPriceSchedule *gas.PricesSchedule
 
-	gp         gasPredictor
-	ap         actorProvider
 	GetMaxFee  DefaultMaxFeeFunc
 	PriceCache *GasPriceCache
 }
@@ -309,7 +299,7 @@ func (ms *msgSet) add(m *types.SignedMessage, mp *MessagePool, strict, untrusted
 		}
 
 		ms.requiredFunds.Sub(ms.requiredFunds, exms.Message.RequiredFunds().Int)
-		//ms.requiredFunds.Sub(ms.requiredFunds, exms.Message.Value.Int)
+		// ms.requiredFunds.Sub(ms.requiredFunds, exms.Message.Value.Int)
 	}
 
 	if !has && strict && len(ms.msgs) >= maxActorPendingMessages {
@@ -325,7 +315,7 @@ func (ms *msgSet) add(m *types.SignedMessage, mp *MessagePool, strict, untrusted
 	ms.nextNonce = nextNonce
 	ms.msgs[m.Message.Nonce] = m
 	ms.requiredFunds.Add(ms.requiredFunds, m.Message.RequiredFunds().Int)
-	//ms.requiredFunds.Add(ms.requiredFunds, m.Message.Value.Int)
+	// ms.requiredFunds.Add(ms.requiredFunds, m.Message.Value.Int)
 
 	return !has, nil
 }
@@ -345,7 +335,7 @@ func (ms *msgSet) rm(nonce uint64, applied bool) {
 	}
 
 	ms.requiredFunds.Sub(ms.requiredFunds, m.Message.RequiredFunds().Int)
-	//ms.requiredFunds.Sub(ms.requiredFunds, m.Message.Value.Int)
+	// ms.requiredFunds.Sub(ms.requiredFunds, m.Message.Value.Int)
 	delete(ms.msgs, nonce)
 
 	// adjust next nonce
@@ -371,7 +361,7 @@ func (ms *msgSet) getRequiredFunds(nonce uint64) big.Int {
 	m, has := ms.msgs[nonce]
 	if has {
 		requiredFunds.Sub(requiredFunds, m.Message.RequiredFunds().Int)
-		//requiredFunds.Sub(requiredFunds, m.Message.Value.Int)
+		// requiredFunds.Sub(requiredFunds, m.Message.Value.Int)
 	}
 
 	return big.Int{Int: requiredFunds}
@@ -392,12 +382,11 @@ func (ms *msgSet) toSlice() []*types.SignedMessage {
 }
 
 func New(api Provider,
+	sm *statemanger.Stmgr,
 	ds repo.Datastore,
 	forkParams *config.ForkUpgradeConfig,
 	mpoolCfg *config.MessagePoolConfig,
 	netName string,
-	gp gasPredictor,
-	ap actorProvider,
 	j journal.Journal,
 ) (*MessagePool, error) {
 	cache, _ := lru.New2Q(constants.BlsSignatureCacheSize)
@@ -414,6 +403,7 @@ func New(api Provider,
 
 	mp := &MessagePool{
 		ds:            ds,
+		sm:            sm,
 		addSema:       make(chan struct{}, 1),
 		closer:        make(chan struct{}),
 		repubTk:       constants.Clock.Ticker(RepublishInterval),
@@ -430,8 +420,6 @@ func New(api Provider,
 		localMsgs:     namespace.Wrap(ds, datastore.NewKey(localMsgsDs)),
 		api:           api,
 		netName:       netName,
-		gp:            gp,
-		ap:            ap,
 		cfg:           cfg,
 		evtTypes: [...]journal.EventType{
 			evtTypeMpoolAdd:    j.RegisterEventType("mpool", "add"),
@@ -891,7 +879,7 @@ func (mp *MessagePool) checkBalance(ctx context.Context, m *types.SignedMessage,
 	}
 
 	// add Value for soft failure check
-	//requiredFunds = types.BigAdd(requiredFunds, m.Message.Value)
+	// requiredFunds = types.BigAdd(requiredFunds, m.Message.Value)
 
 	mset, ok, err := mp.getPendingMset(ctx, m.Message.From)
 	if err != nil {

@@ -28,7 +28,7 @@ import (
 	states5 "github.com/filecoin-project/specs-actors/v5/actors/states"
 )
 
-type StateTreeVersion uint64 //nolint
+type StateTreeVersion uint64 // nolint
 
 type ActorKey = address.Address
 
@@ -68,7 +68,7 @@ const (
 	StateTreeVersion4
 )
 
-type StateRoot struct { //nolint
+type StateRoot struct { // nolint
 	// State tree version.
 	Version StateTreeVersion
 	// Actors tree. The structure depends on the state root version.
@@ -78,7 +78,7 @@ type StateRoot struct { //nolint
 }
 
 // TODO: version this.
-type StateInfo0 struct{} //nolint
+type StateInfo0 struct{} // nolint
 
 var lengthBufStateInfo0 = []byte{128}
 
@@ -328,19 +328,15 @@ func (st *State) LookupID(addr ActorKey) (address.Address, error) {
 // ToDo Return nil if it is actor not found[ErrActorNotFound],Because the basis for judgment is: err != nil ==> panic ???
 // GetActor returns the actor from any type of `addr` provided.
 func (st *State) GetActor(ctx context.Context, addr ActorKey) (*types.Actor, bool, error) {
-	if addr == address.Undef {
-		return nil, false, fmt.Errorf("GetActor called on undefined address")
-	}
-
-	// Transform `addr` to its ID format.
-	iaddr, err := st.LookupID(addr)
-	if err != nil {
-		if xerrors.Is(err, types.ErrActorNotFound) {
-			return nil, false, nil
+	var err error
+	if addr.Protocol() != address.ID {
+		if addr, err = st.LookupID(addr); err != nil {
+			if xerrors.Is(err, types.ErrActorNotFound) {
+				return nil, false, nil
+			}
+			return nil, false, xerrors.Errorf("address resolution: %v", err)
 		}
-		return nil, false, xerrors.Errorf("address resolution: %v", err)
 	}
-	addr = iaddr
 
 	snapAct, err := st.snaps.getActor(addr)
 	if err != nil {
@@ -396,7 +392,7 @@ func (st *State) DeleteActor(ctx context.Context, addr ActorKey) error {
 }
 
 func (st *State) Flush(ctx context.Context) (cid.Cid, error) {
-	ctx, span := trace.StartSpan(ctx, "stateTree.Flush") //nolint:staticcheck
+	ctx, span := trace.StartSpan(ctx, "stateTree.Flush") // nolint:staticcheck
 	defer span.End()
 	if len(st.snaps.layers) != 1 {
 		return cid.Undef, xerrors.Errorf("tried to flush state tree with snapshots on the stack")
@@ -427,7 +423,7 @@ func (st *State) Flush(ctx context.Context) (cid.Cid, error) {
 }
 
 func (st *State) Snapshot(ctx context.Context) error {
-	ctx, span := trace.StartSpan(ctx, "stateTree.SnapShot") //nolint:staticcheck
+	ctx, span := trace.StartSpan(ctx, "stateTree.SnapShot") // nolint:staticcheck
 	defer span.End()
 
 	st.snaps.addLayer()

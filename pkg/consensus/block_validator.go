@@ -48,7 +48,7 @@ var ErrTemporal = errors.New("temporal error")
 var ErrSoftFailure = errors.New("soft validation failure")
 var ErrInsufficientPower = errors.New("incoming block's miner does not have minimum power")
 
-//BlockValidator used to validate a block is ok or not
+// BlockValidator used to validate a block is ok or not
 type BlockValidator struct {
 	// TicketValidator validates ticket generation
 	tv TicketValidator
@@ -75,9 +75,11 @@ type BlockValidator struct {
 	gasPirceSchedule *gas.PricesSchedule
 	// cache for validate block
 	validateBlockCache *lru.ARCCache
+
+	Stmgr StateTransformer
 }
 
-//NewBlockValidator create a new block validator
+// NewBlockValidator create a new block validator
 func NewBlockValidator(tv TicketValidator,
 	bstore blockstore.Blockstore,
 	messageStore *chain.MessageStore,
@@ -108,7 +110,7 @@ func NewBlockValidator(tv TicketValidator,
 	}
 }
 
-//ValidateBlockMsg used to validate block from incoming. check message, signature , wincount.
+// ValidateBlockMsg used to validate block from incoming. check message, signature , wincount.
 // if give a reject error. local node reject this block. if give a ignore error. recheck this block in latest notify
 func (bv *BlockValidator) ValidateBlockMsg(ctx context.Context, blk *types.BlockMsg) pubsub.ValidationResult {
 	validationStart := time.Now()
@@ -119,23 +121,21 @@ func (bv *BlockValidator) ValidateBlockMsg(ctx context.Context, blk *types.Block
 	return bv.validateBlockMsg(ctx, blk)
 }
 
-//ValidateFullBlock should match up with 'Semantical Validation' in validation.md in the spec
+// ValidateFullBlock should match up with 'Semantical Validation' in validation.md in the spec
 func (bv *BlockValidator) ValidateFullBlock(ctx context.Context, blk *types.BlockHeader) (err error) {
+	log.Infof("validateFullBlock:%d, cid:%s", blk.Height, blk.Cid().String())
 	validationStart := time.Now()
 	defer func() {
+		if err == nil {
+			bv.validateBlockCache.Add(blk.Cid(), struct{}{})
+		}
 		logExpect.Infow("block validation", "Cid", blk.Cid(), "took", time.Since(validationStart), "height", blk.Height, "age", time.Since(time.Unix(int64(blk.Timestamp), 0)), "Err", err)
 	}()
 
 	if _, ok := bv.validateBlockCache.Get(blk.Cid()); ok {
 		return nil
 	}
-
-	err = bv.validateBlock(ctx, blk)
-
-	if err == nil {
-		bv.validateBlockCache.Add(blk.Cid(), struct{}{})
-	}
-	return err
+	return bv.validateBlock(ctx, blk)
 }
 
 func (bv *BlockValidator) validateBlock(ctx context.Context, blk *types.BlockHeader) error {
@@ -146,18 +146,6 @@ func (bv *BlockValidator) validateBlock(ctx context.Context, blk *types.BlockHea
 	parentWeight, err := bv.chainSelector.Weight(ctx, parent)
 	if err != nil {
 		return xerrors.Errorf("calc parent weight failed %w", err)
-	}
-	parentReceiptRoot, err := bv.chainState.GetTipSetReceiptsRoot(parent)
-	if err != nil {
-		return xerrors.Errorf("get parent tipset state failed %w", err)
-	}
-	// confirm block state root matches parent state root
-	rootAfterCalc, err := bv.chainState.GetTipSetStateRoot(parent)
-	if err != nil {
-		return xerrors.Errorf("get parent tipset state failed %w", err)
-	}
-	if !rootAfterCalc.Equals(blk.ParentStateRoot) {
-		return xerrors.Errorf("%w (%s != %s)", ErrStateRootMismatch, rootAfterCalc, blk.ParentStateRoot)
 	}
 
 	if err := blockSanityChecks(blk); err != nil {
@@ -184,11 +172,6 @@ func (bv *BlockValidator) validateBlock(ctx context.Context, blk *types.BlockHea
 		return xerrors.Errorf("failed to get latest beacon entry: %w", err)
 	}
 
-	// confirm block receipts match parent receipts
-	if !parentReceiptRoot.Equals(blk.ParentMessageReceipts) {
-		return ErrReceiptRootMismatch
-	}
-
 	if !parentWeight.Equals(blk.ParentWeight) {
 		return xerrors.Errorf("block %s has invalid parent weight %d expected %d", blk.Cid().String(), blk.ParentWeight, parentWeight)
 	}
@@ -207,6 +190,14 @@ func (bv *BlockValidator) validateBlock(ctx context.Context, blk *types.BlockHea
 	}
 
 	minerCheck := async.Err(func() error {
+		statRoot, _, err := bv.Stmgr.RunStateTransition(ctx, parent)
+		if err != nil {
+			return err
+		}
+		if !statRoot.Equals(blk.ParentStateRoot) {
+			return fmt.Errorf("expect verify miner on stateroot:%s, but caclutated is :%s",
+				blk.ParentStateRoot.String(), statRoot.String())
+		}
 		if err := bv.minerIsValid(ctx, blk.Miner, blk.ParentStateRoot); err != nil {
 			return xerrors.Errorf("minerIsValid failed: %w", err)
 		}
@@ -268,11 +259,38 @@ func (bv *BlockValidator) validateBlock(ctx context.Context, blk *types.BlockHea
 	})
 
 	msgsCheck := async.Err(func() error {
-		keyStateView := bv.state.PowerStateView(blk.ParentStateRoot)
+		statRoot, _, err := bv.Stmgr.RunStateTransition(ctx, parent)
+		if err != nil {
+			return err
+		}
+		keyStateView := bv.state.PowerStateView(statRoot)
 		sigValidator := appstate.NewSignatureValidator(keyStateView)
 		if err := bv.checkBlockMessages(ctx, sigValidator, blk, parent); err != nil {
 			return xerrors.Errorf("block had invalid messages: %w", err)
 		}
+		return nil
+	})
+
+	stateRootCheck := async.Err(func() error {
+		stateroot, precp, err := bv.Stmgr.RunStateTransition(ctx, parent)
+		if err != nil {
+			return xerrors.Errorf("get tipsetstate(%d, %s) failed: %w", blk.Height, blk.Parents, err)
+		}
+
+		if !stateroot.Equals(blk.ParentStateRoot) {
+			log.Warnf("Check StateRoot for tipset(%s, %d) with mismatching state, expected:%s, actually:%s",
+				parent.Key().String(), parent.Height(), blk.ParentStateRoot.String(), stateroot.String())
+			return xerrors.Errorf("tipset(%s) state mis-match computed state (%s != %s),%w",
+				parent.Key().String(), stateroot, blk.ParentStateRoot, ErrStateRootMismatch)
+		}
+
+		if !precp.Equals(blk.ParentMessageReceipts) {
+			log.Warnf("Check MessageReceipts for tipset(%s, %d) with mismatching state, expected:%s, actually:%s",
+				parent.Key().String(), parent.Height(), blk.ParentStateRoot.String(), stateroot.String())
+			return xerrors.Errorf("tipset(%s) message receipts mis-match computed state (%s != %s),%w",
+				parent.Key().String(), stateroot, blk.ParentStateRoot, ErrStateRootMismatch)
+		}
+
 		return nil
 	})
 
@@ -283,8 +301,9 @@ func (bv *BlockValidator) validateBlock(ctx context.Context, blk *types.BlockHea
 		beaconValuesCheck,
 		wproofCheck,
 		winnerCheck,
-		baseFeeCheck,
 		msgsCheck,
+		baseFeeCheck,
+		stateRootCheck,
 	}
 
 	var merr error
@@ -300,7 +319,6 @@ func (bv *BlockValidator) validateBlock(ctx context.Context, blk *types.BlockHea
 			if len(es) == 1 {
 				return fmt.Sprintf("1 error occurred:\n\t* %+v\n\n", es[0])
 			}
-
 			points := make([]string, len(es))
 			for i, err := range es {
 				points[i] = fmt.Sprintf("* %+v", err)

@@ -27,8 +27,8 @@ type Target struct {
 	types.ChainInfo
 }
 
-//IsNeighbor the target t is neighbor or not
-//the same height, the same weight, the same parent is neighbor target. the can merge
+// IsNeighbor the target t is neighbor or not
+// the same height, the same weight, the same parent is neighbor target. the can merge
 func (target *Target) IsNeighbor(t *Target) bool {
 	if target.Head.Height() != t.Head.Height() {
 		return false
@@ -46,13 +46,13 @@ func (target *Target) IsNeighbor(t *Target) bool {
 	return true
 }
 
-//HasChild is another is a child target of current.
-//if the t' blocks in a subset of current target ,the t is a child of current target
+// HasChild is another is a child target of current.
+// if the t' blocks in a subset of current target ,the t is a child of current target
 func (target *Target) HasChild(t *Target) bool {
 	return target.Head.Key().ContainsAll(t.Head.Key())
 }
 
-//Key return identity of target . key=weight+height+parent
+// Key return identity of target . key=weight+height+parent
 func (target *Target) Key() string {
 	weightIn := target.Head.ParentWeight()
 	return weightIn.String() +
@@ -77,6 +77,9 @@ type TargetTracker struct {
 	targetSet   map[string]*Target
 	lowWeight   fbig.Int
 	lk          sync.Mutex
+
+	subs  map[string]chan struct{}
+	subLk sync.Mutex
 }
 
 // NewTargetTracker returns a new target queue.
@@ -89,6 +92,37 @@ func NewTargetTracker(size int) *TargetTracker {
 		targetSet:   make(map[string]*Target),
 		lk:          sync.Mutex{},
 		lowWeight:   fbig.NewInt(0),
+		subs:        make(map[string]chan struct{}),
+	}
+}
+
+func (tq *TargetTracker) SubNewTarget(key string, cacheSize int) chan struct{} {
+	tq.subLk.Lock()
+	defer tq.subLk.Unlock()
+	ch, isok := tq.subs[key]
+	if isok {
+		return ch
+	}
+	ch = make(chan struct{}, cacheSize)
+	tq.subs[key] = ch
+	return ch
+}
+
+func (tq *TargetTracker) UnsubNewTarget(key string) {
+	tq.subLk.Lock()
+	defer tq.subLk.Unlock()
+	if ch, isok := tq.subs[key]; isok {
+		delete(tq.subs, key)
+		close(ch)
+	}
+}
+
+// todo: we should pub a 'stable' target
+func (tq *TargetTracker) pubNewTarget() {
+	tq.subLk.Lock()
+	defer tq.subLk.Unlock()
+	for _, ch := range tq.subs {
+		ch <- struct{}{}
 	}
 }
 
@@ -104,9 +138,11 @@ func NewTargetTracker(size int) *TargetTracker {
 // If there are any vacancies, the current target will be appended to the end.
 // After each completion of this process, all targets will be reordered. First, they will be sorted according to the weight from small to large, and then they will be sorted according to the number of blocks in the group from small to large, Include as many blocks as possible.
 func (tq *TargetTracker) Add(t *Target) bool {
+	now := time.Now()
+
 	tq.lk.Lock()
 	defer tq.lk.Unlock()
-	//do not sync less weight
+	// do not sync less weight
 	if t.Head.At(0).ParentWeight.LessThan(tq.lowWeight) {
 		return false
 	}
@@ -116,10 +152,10 @@ func (tq *TargetTracker) Add(t *Target) bool {
 		return false
 	}
 
-	//replace last idle task because of less weight
+	// replace last idle task because of less weight
 	var replaceIndex int
 	var replaceTarget *Target
-	//try to replace a idea child target
+	// try to replace a idea child target
 	for i := len(tq.q) - 1; i > -1; i-- {
 		if t.HasChild(tq.q[i]) && tq.q[i].State == StageIdle {
 			replaceTarget = tq.q[i]
@@ -130,7 +166,7 @@ func (tq *TargetTracker) Add(t *Target) bool {
 	}
 
 	if replaceTarget == nil {
-		//replace a least weight idle
+		// replace a least weight idle
 		for i := len(tq.q) - 1; i > -1; i-- {
 			if tq.q[i].State == StageIdle {
 				replaceTarget = tq.q[i]
@@ -143,28 +179,34 @@ func (tq *TargetTracker) Add(t *Target) bool {
 
 	if replaceTarget == nil {
 		if len(tq.q) < tq.bucketSize {
-			//append to last slot
+			// append to last slot
 			tq.q = append(tq.q, t)
 		} else {
-			//return if target queue is full
+			// return if target queue is full
 			return false
 		}
 	} else {
-
 		delete(tq.targetSet, replaceTarget.ChainInfo.Head.String())
 		tq.q[replaceIndex] = t
 	}
 
 	tq.targetSet[t.ChainInfo.Head.String()] = t
 	sortTarget(tq.q)
-	//update lowweight
+	// update lowweight
 	tq.lowWeight = tq.q[len(tq.q)-1].Head.At(0).ParentWeight
+
+	tq.pubNewTarget()
+
+	defer func(t *Target) {
+		log.Infof("add new block(height:%d, count:%d) cost time=%.4f\n",
+			t.Head.Height(), t.Head.Len(), time.Since(now).Seconds())
+	}(t)
 	return true
 }
 
-//sort by weight and than sort by block number in target buckets
+// sort by weight and than sort by block number in target buckets
 func sortTarget(target TargetBuckets) {
-	//use weight as group key
+	// use weight as group key
 	groups := make(map[string][]*Target)
 	var keys []fbig.Int
 	for _, t := range target {
@@ -177,12 +219,12 @@ func sortTarget(target TargetBuckets) {
 		}
 	}
 
-	//sort group by weight
+	// sort group by weight
 	sort.Slice(keys, func(i, j int) bool {
 		return keys[i].GreaterThan(keys[j])
 	})
 
-	//sort target in group by block number
+	// sort target in group by block number
 	for _, key := range keys {
 		inGroup := groups[key.String()]
 		sort.Slice(inGroup, func(i, j int) bool {
@@ -190,7 +232,7 @@ func sortTarget(target TargetBuckets) {
 		})
 	}
 
-	//update target buckets
+	// update target buckets
 	count := 0
 	for _, key := range keys {
 		for _, t := range groups[key.String()] {
@@ -215,7 +257,7 @@ func (tq *TargetTracker) widen(t *Target) (*Target, bool) {
 		}
 	}
 
-	//collect neighbor block in queue include history to get block with same weight and height
+	// collect neighbor block in queue include history to get block with same weight and height
 	sameWeightBlks := make(map[cid.Cid]*types.BlockHeader)
 	for _, val := range tq.targetSet {
 		if val.IsNeighbor(t) {
@@ -234,7 +276,7 @@ func (tq *TargetTracker) widen(t *Target) (*Target, bool) {
 		return t, true
 	}
 
-	//apply block that t don't have
+	// apply block that t don't have
 	blks := t.Head.Blocks()
 	for _, blk := range sameWeightBlks {
 		blks = append(blks, blk)
@@ -263,15 +305,14 @@ func (tq *TargetTracker) Select() (*Target, bool) {
 			break
 		}
 	}
-
 	if toSyncTarget == nil {
 		return nil, false
 	}
 	return toSyncTarget, true
 }
 
-//Remove remote a target after sync completed
-//First remove target from live queue, add the target to history.
+// Remove remote a target after sync completed
+// First remove target from live queue, add the target to history.
 func (tq *TargetTracker) Remove(t *Target) {
 	tq.lk.Lock()
 	defer tq.lk.Unlock()
@@ -283,14 +324,14 @@ func (tq *TargetTracker) Remove(t *Target) {
 	}
 	t.End = time.Now()
 	if tq.history.Len() > tq.historySize {
-		tq.history.Remove(tq.history.Front()) //remove olddest
+		tq.history.Remove(tq.history.Front()) // remove olddest
 		popKey := tq.history.Front().Value.(*Target).ChainInfo.Head.String()
 		delete(tq.targetSet, popKey)
 	}
 	tq.history.PushBack(t)
 }
 
-//History return sync history
+// History return sync history
 func (tq *TargetTracker) History() []*Target {
 	tq.lk.Lock()
 	defer tq.lk.Unlock()

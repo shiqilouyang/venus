@@ -158,7 +158,7 @@ var msigInspectCmd = &cmds.Command{
 		}
 		ctx := req.Context
 		store := adt.WrapStore(ctx, cbor.NewCborStore(sbchain.NewAPIBlockstore(env.(*node.Env).BlockStoreAPI)))
-		//store := env.(*node.Env).ChainAPI.ChainReader.Store(req.Context)
+		//store := env.(*node.Env).ChainAPI.ChainStore.Store(req.Context)
 		maddr, err := address.NewFromString(req.Arguments[0])
 		if err != nil {
 			return err

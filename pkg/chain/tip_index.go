@@ -105,7 +105,7 @@ func (ti *TipStateCache) Get(ts *types.TipSet) (*TipSetMetadata, error) {
 	if !ok {
 		tipSetMetadata, err := ti.loader.LoadTipsetMetadata(ts)
 		if err != nil {
-			return nil, xerrors.New("state not exit")
+			return nil, xerrors.New("state not exist")
 		}
 
 		err = ti.put(tipSetMetadata)
@@ -141,6 +141,12 @@ func (ti *TipStateCache) GetTipSetReceiptsRoot(ts *types.TipSet) (cid.Cid, error
 func (ti *TipStateCache) Has(ts *types.TipSet) bool {
 	_, err := ti.Get(ts)
 	return err == nil
+}
+
+func (ti *TipStateCache) Del(ts *types.TipSet) {
+	ti.mu.Lock()
+	defer ti.mu.Unlock()
+	ti.tsasByID.Delete(ts.String())
 }
 
 // GetSiblingState returns the all tipsets and states stored in the TipStateCache

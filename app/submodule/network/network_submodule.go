@@ -56,7 +56,7 @@ import (
 var networkLogger = logging.Logger("network_module")
 
 // NetworkSubmodule enhances the `Node` with networking capabilities.
-type NetworkSubmodule struct { //nolint
+type NetworkSubmodule struct { // nolint
 	NetworkName string
 
 	Host host.Host
@@ -73,14 +73,14 @@ type NetworkSubmodule struct { //nolint
 
 	GraphExchange graphsync.GraphExchange
 
-	blockstore blockstoreutil.Blockstore
+	Blockstore blockstoreutil.Blockstore
 	PeerMgr    net.IPeerMgr
-	//data transfer
+	// data transfer
 	DataTransfer     datatransfer.Manager
 	DataTransferHost dtnet.DataTransferNetwork
 }
 
-//API create a new network implement
+// API create a new network implement
 func (networkSubmodule *NetworkSubmodule) API() apiface.INetwork {
 	return &networkAPI{network: networkSubmodule}
 }
@@ -90,8 +90,13 @@ func (networkSubmodule *NetworkSubmodule) V0API() apiface.INetwork {
 }
 
 func (networkSubmodule *NetworkSubmodule) Stop(ctx context.Context) {
+	networkLogger.Infof("closing bitswap")
+	if err := networkSubmodule.Bitswap.Close(); err != nil {
+		networkLogger.Errorf("error closing bitswap: %s", err.Error())
+	}
+	networkLogger.Infof("closing host")
 	if err := networkSubmodule.Host.Close(); err != nil {
-		fmt.Printf("error closing host: %s\n", err)
+		networkLogger.Errorf("error closing host: %s", err.Error())
 	}
 }
 
@@ -209,8 +214,8 @@ func NewNetworkSubmodule(ctx context.Context, config networkConfig) (*NetworkSub
 	lsys := storeutil.LinkSystemForBlockstore(config.Repo().Datastore())
 	gsync := graphsyncimpl.New(ctx, graphsyncNetwork, lsys, graphsyncimpl.RejectAllRequestsByDefault())
 
-	//dataTransger
-	//sc := storedcounter.New(repo.ChainDatastore(), datastore.NewKey("/datatransfer/api/counter"))
+	// dataTransger
+	// sc := storedcounter.New(repo.ChainDatastore(), datastore.NewKey("/datatransfer/api/counter"))
 	dtNet := dtnet.NewFromLibp2pHost(peerHost)
 	dtDs := namespace.Wrap(config.Repo().ChainDatastore(), datastore.NewKey("/datatransfer/api/transfers"))
 	transport := dtgstransport.NewTransport(peerHost.ID(), gsync)
@@ -221,7 +226,7 @@ func NewNetworkSubmodule(ctx context.Context, config networkConfig) (*NetworkSub
 	}
 
 	dirPath := filepath.Join(repoPath, "data-transfer")
-	_ = os.MkdirAll(dirPath, 0777) //todo fix for test
+	_ = os.MkdirAll(dirPath, 0777) // todo fix for test
 	dt, err := dtimpl.NewDataTransfer(dtDs, dirPath, dtNet, transport)
 	if err != nil {
 		return nil, err
@@ -241,54 +246,49 @@ func NewNetworkSubmodule(ctx context.Context, config networkConfig) (*NetworkSub
 		DataTransfer:     dt,
 		DataTransferHost: dtNet,
 		PeerMgr:          peerMgr,
-		blockstore:       config.Repo().Datastore(),
+		Blockstore:       config.Repo().Datastore(),
 	}, nil
 }
 
 func (networkSubmodule *NetworkSubmodule) FetchMessagesByCids(
 	ctx context.Context,
+	service bserv.BlockService,
 	cids []cid.Cid,
 ) ([]*types.UnsignedMessage, error) {
 	out := make([]*types.UnsignedMessage, len(cids))
-	blks, err := networkSubmodule.fetchCids(ctx, cids)
-	if err != nil {
-		return nil, err
-	}
-	for index, blk := range blks {
+	err := networkSubmodule.fetchCids(ctx, service, cids, func(idx int, blk blocks.Block) error {
 		var msg types.UnsignedMessage
-		err := msg.UnmarshalCBOR(bytes.NewReader(blk.RawData()))
-		if err != nil {
-			return nil, err
+		if err := msg.UnmarshalCBOR(bytes.NewReader(blk.RawData())); err != nil {
+			return err
 		}
-		out[index] = &msg
-	}
-	return out, nil
+		out[idx] = &msg
+		return nil
+	})
+	return out, err
 }
 
 func (networkSubmodule *NetworkSubmodule) FetchSignedMessagesByCids(
 	ctx context.Context,
+	service bserv.BlockService,
 	cids []cid.Cid,
 ) ([]*types.SignedMessage, error) {
 	out := make([]*types.SignedMessage, len(cids))
-	blks, err := networkSubmodule.fetchCids(ctx, cids)
-	if err != nil {
-		return nil, err
-	}
-	for index, blk := range blks {
+	err := networkSubmodule.fetchCids(ctx, service, cids, func(idx int, blk blocks.Block) error {
 		var msg types.SignedMessage
-		err := msg.UnmarshalCBOR(bytes.NewReader(blk.RawData()))
-		if err != nil {
-			return nil, err
+		if err := msg.UnmarshalCBOR(bytes.NewReader(blk.RawData())); err != nil {
+			return err
 		}
-		out[index] = &msg
-	}
-	return out, nil
+		out[idx] = &msg
+		return nil
+	})
+	return out, err
 }
 
 func (networkSubmodule *NetworkSubmodule) fetchCids(
 	ctx context.Context,
+	srv bserv.BlockService,
 	cids []cid.Cid,
-) ([]blocks.Block, error) {
+	onfetchOneBlock func(int, blocks.Block) error) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
@@ -298,11 +298,10 @@ func (networkSubmodule *NetworkSubmodule) fetchCids(
 	}
 
 	if len(cids) != len(cidIndex) {
-		return nil, fmt.Errorf("duplicate CIDs in fetchCids input")
+		return fmt.Errorf("duplicate CIDs in fetchCids input")
 	}
 
 	msgBlocks := make([]blocks.Block, len(cids))
-	srv := bserv.New(networkSubmodule.blockstore, networkSubmodule.Bitswap)
 	for block := range srv.GetBlocks(ctx, cids) {
 		ix, ok := cidIndex[block.Cid()]
 		if !ok {
@@ -315,17 +314,23 @@ func (networkSubmodule *NetworkSubmodule) fetchCids(
 		// Record that we've received the block.
 		delete(cidIndex, block.Cid())
 		msgBlocks[ix] = block
+		if onfetchOneBlock != nil {
+			if err := onfetchOneBlock(ix, block); err != nil {
+				return err
+			}
+		}
 	}
 
+	// 'cidIndex' should be 0 here, that means we had fetched all blocks in 'cids'.
 	if len(cidIndex) > 0 {
 		err := ctx.Err()
 		if err == nil {
 			err = fmt.Errorf("failed to fetch %d messages for unknown reasons", len(cidIndex))
 		}
-		return nil, err
+		return err
 	}
 
-	return msgBlocks, nil
+	return nil
 }
 
 func retrieveNetworkName(ctx context.Context, genCid cid.Cid, cborStore cbor.IpldStore) (string, error) {

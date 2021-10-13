@@ -90,6 +90,8 @@ type chainReader interface {
 	GetTipSetByHeight(context.Context, *types.TipSet, abi.ChainEpoch, bool) (*types.TipSet, error)
 	GetCirculatingSupplyDetailed(context.Context, abi.ChainEpoch, tree.Tree) (chain.CirculatingSupply, error)
 	GetLookbackTipSetForRound(ctx context.Context, ts *types.TipSet, round abi.ChainEpoch, version network.Version) (*types.TipSet, cid.Cid, error)
+	GetTipsetMetadata(*types.TipSet) (*chain.TipSetMetadata, error)
+	PutTipSetMetadata(context.Context, *chain.TipSetMetadata) error
 }
 
 // Expected implements expected consensus.
@@ -105,8 +107,8 @@ type Expected struct {
 	// message store for message read/write
 	messageStore *chain.MessageStore
 
-	// chainState is a reference to the current Chain state
-	chainState chainReader
+	// chainStore is a reference to the current Chain state
+	chainStore chainReader
 
 	// processor is what we use to process messages and pay rewards
 	processor Processor
@@ -130,14 +132,11 @@ type Expected struct {
 	blockValidator *BlockValidator
 }
 
-// Ensure Expected satisfies the Protocol interface at compile time.
-var _ Protocol = (*Expected)(nil)
-
 // NewExpected is the constructor for the Expected consenus.Protocol module.
 func NewExpected(cs cbor.IpldStore,
 	bs blockstore.Blockstore,
 	bt time.Duration,
-	chainState chainReader,
+	chainStore *chain.Store,
 	rnd ChainRandomness,
 	messageStore *chain.MessageStore,
 	fork fork.IFork,
@@ -148,38 +147,41 @@ func NewExpected(cs cbor.IpldStore,
 	circulatingSupplyCalculator chain.ICirculatingSupplyCalcualtor,
 ) *Expected {
 	processor := NewDefaultProcessor(syscalls)
-	c := &Expected{
+	return &Expected{
 		processor:                   processor,
 		syscallsImpl:                syscalls,
 		cstore:                      cs,
 		bstore:                      bs,
-		chainState:                  chainState,
-		messageStore:                messageStore,
+		chainStore:                  chainStore,
 		rnd:                         rnd,
+		messageStore:                messageStore,
 		fork:                        fork,
 		gasPirceSchedule:            gasPirceSchedule,
 		blockValidator:              blockValidator,
 		circulatingSupplyCalculator: circulatingSupplyCalculator,
 	}
-	return c
 }
 
 // RunStateTransition applies the messages in a tipset to a state, and persists that new state.
 // It errors if the tipset was not mined according to the EC rules, or if any of the messages
 // in the tipset results in an error.
-func (c *Expected) RunStateTransition(ctx context.Context,
-	ts *types.TipSet,
-	parentStateRoot cid.Cid,
-) (cid.Cid, cid.Cid, error) {
-	ctx, span := trace.StartSpan(ctx, "Expected.RunStateTransition")
-	span.AddAttributes(trace.StringAttribute("tipset", ts.String()))
-
+func (c *Expected) RunStateTransition(ctx context.Context, ts *types.TipSet) (cid.Cid, cid.Cid, error) {
+	begin := time.Now()
+	defer func() {
+		logExpect.Infof("expected.runstatetransition(height:%d, blocks:%d), cost time = %.4f(s)",
+			ts.Height(), ts.Len(), time.Since(begin).Seconds())
+	}()
+	ctx, span := trace.StartSpan(ctx, "Expected.innerRunStateTransition")
+	defer span.End()
+	span.AddAttributes(trace.StringAttribute("blocks", ts.String()))
+	span.AddAttributes(trace.Int64Attribute("height", int64(ts.Height())))
 	blockMessageInfo, err := c.messageStore.LoadTipSetMessage(ctx, ts)
 	if err != nil {
-		return cid.Undef, cid.Undef, nil
+		return cid.Undef, cid.Undef, err
 	}
 	// process tipset
 	var pts *types.TipSet
+
 	if ts.Height() == 0 {
 		// NB: This is here because the process that executes blocks requires that the
 		// block miner reference a valid miner in the state tree. Unless we create some
@@ -188,8 +190,7 @@ func (c *Expected) RunStateTransition(ctx context.Context,
 		return ts.Blocks()[0].ParentStateRoot, ts.Blocks()[0].ParentMessageReceipts, nil
 	} else if ts.Height() > 0 {
 		parent := ts.Parents()
-		pts, err = c.chainState.GetTipSet(parent)
-		if err != nil {
+		if pts, err = c.chainStore.GetTipSet(parent); err != nil {
 			return cid.Undef, cid.Undef, err
 		}
 	} else {
@@ -198,7 +199,7 @@ func (c *Expected) RunStateTransition(ctx context.Context,
 
 	vmOption := vm.VmOption{
 		CircSupplyCalculator: func(ctx context.Context, epoch abi.ChainEpoch, tree tree.Tree) (abi.TokenAmount, error) {
-			dertail, err := c.chainState.GetCirculatingSupplyDetailed(ctx, epoch, tree)
+			dertail, err := c.chainStore.GetCirculatingSupplyDetailed(ctx, epoch, tree)
 			if err != nil {
 				return abi.TokenAmount{}, err
 			}
@@ -211,14 +212,14 @@ func (c *Expected) RunStateTransition(ctx context.Context,
 		Epoch:             ts.At(0).Height,
 		GasPriceSchedule:  c.gasPirceSchedule,
 		Bsstore:           c.bstore,
-		PRoot:             parentStateRoot,
+		PRoot:             ts.At(0).ParentStateRoot,
 		SysCallsImpl:      c.syscallsImpl,
 	}
+
 	root, receipts, err := c.processor.ProcessTipSet(ctx, pts, ts, blockMessageInfo, vmOption)
 	if err != nil {
 		return cid.Undef, cid.Undef, errors.Wrap(err, "error validating tipset")
 	}
-
 	receiptCid, err := c.messageStore.StoreReceipts(ctx, receipts)
 	if err != nil {
 		return cid.Undef, cid.Undef, xerrors.Errorf("failed to save receipt: %v", err)

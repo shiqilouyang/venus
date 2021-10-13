@@ -3,35 +3,31 @@ package mpool
 import (
 	"context"
 	"encoding/json"
-	"github.com/filecoin-project/venus/app/client/apiface"
-
-	"github.com/filecoin-project/venus/app/submodule/apitypes"
-
 	"github.com/filecoin-project/go-address"
-	"github.com/ipfs/go-cid"
-	"golang.org/x/xerrors"
-
 	"github.com/filecoin-project/go-state-types/big"
-
+	"github.com/filecoin-project/venus/app/client/apiface"
+	"github.com/filecoin-project/venus/app/submodule/apitypes"
 	"github.com/filecoin-project/venus/pkg/messagepool"
 	"github.com/filecoin-project/venus/pkg/types"
+	"github.com/ipfs/go-cid"
+	"golang.org/x/xerrors"
 )
 
 var _ apiface.IMessagePool = &MessagePoolAPI{}
 
-//MessagePoolAPI messsage pool api implement
+// MessagePoolAPI messsage pool api implement
 type MessagePoolAPI struct {
 	pushLocks *messagepool.MpoolLocker
 
 	mp *MessagePoolSubmodule
 }
 
-//MpoolDeleteByAdress delete msg in mpool of addr
+// MpoolDeleteByAdress delete msg in mpool of addr
 func (a *MessagePoolAPI) MpoolDeleteByAdress(ctx context.Context, addr address.Address) error {
 	return a.mp.MPool.DeleteByAdress(addr)
 }
 
-//MpoolPublish publish message of address
+// MpoolPublish publish message of address
 func (a *MessagePoolAPI) MpoolPublishByAddr(ctx context.Context, addr address.Address) error {
 	return a.mp.MPool.PublishMsgForWallet(ctx, addr)
 }
@@ -65,7 +61,7 @@ func (a *MessagePoolAPI) MpoolSelect(ctx context.Context, tsk types.TipSetKey, t
 	return a.mp.MPool.SelectMessages(ctx, ts, ticketQuality)
 }
 
-//MpoolSelects The batch selection message is used when multiple blocks need to select messages at the same time
+// MpoolSelects The batch selection message is used when multiple blocks need to select messages at the same time
 func (a *MessagePoolAPI) MpoolSelects(ctx context.Context, tsk types.TipSetKey, ticketQualitys []float64) ([][]*types.SignedMessage, error) {
 	ts, err := a.mp.chain.API().ChainGetTipSet(ctx, tsk)
 	if err != nil {
@@ -316,8 +312,8 @@ func (a *MessagePoolAPI) MpoolCheckReplaceMessages(ctx context.Context, msg []*t
 
 /*// WalletSign signs the given bytes using the given address.
 func (a *MessagePoolAPI) WalletSign(ctx context.Context, k address.Address, msg []byte) (*crypto.Signature, error) {
-	head := a.mp.chain.ChainReader.GetHead()
-	view, err := a.mp.chain.ChainReader.StateView(head)
+	head := a.mp.chain.ChainStore.GetHead()
+	view, err := a.mp.chain.ChainStore.StateView(head)
 	if err != nil {
 		return nil, err
 	}

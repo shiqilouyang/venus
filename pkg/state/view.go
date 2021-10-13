@@ -628,10 +628,8 @@ func (v *View) StateMinerPower(ctx context.Context, maddr addr.Address, tsk type
 		var found bool
 		mpow, found, err = pas.MinerPower(maddr)
 		if err != nil || !found {
-			// TODO: return an error when not found?
 			return power.Claim{}, tpow, false, err
 		}
-
 		minpow, err = pas.MinerNominalPowerMeetsConsensusMinimum(maddr)
 		if err != nil {
 			return power.Claim{}, power.Claim{}, false, err

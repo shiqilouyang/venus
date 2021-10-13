@@ -84,22 +84,22 @@ func TestJsonrpc(t *testing.T) {
 type tmodule1 struct {
 }
 
-func (m *tmodule1) V0API() MockAPI1 { //nolint
+func (m *tmodule1) V0API() MockAPI1 { // nolint
 	return &mockAPI1{}
 }
 
-func (m *tmodule1) API() MockAPI1 { //nolint
+func (m *tmodule1) API() MockAPI1 { // nolint
 	return &mockAPI1{}
 }
 
 type tmodule2 struct {
 }
 
-func (m *tmodule2) V0API() MockAPI2 { //nolint
+func (m *tmodule2) V0API() MockAPI2 { // nolint
 	return &mockAPI2{}
 }
 
-func (m *tmodule2) API() MockAPI2 { //nolint
+func (m *tmodule2) API() MockAPI2 { // nolint
 	return &mockAPI2{}
 }
 
@@ -132,6 +132,11 @@ type FullAdapter struct {
 	CommonAdapter
 	Adapter2
 }
+
+func (f *FullAdapter) Test1(ctx context.Context) (string, error) {
+	return f.CommonAdapter.Internal.Test1(ctx)
+}
+
 type CommonAdapter struct {
 	Adapter1
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"github.com/filecoin-project/venus/app/client/apiface"
 	"github.com/filecoin-project/venus/app/client/apiface/v0api"
+	"github.com/filecoin-project/venus/pkg/statemanger"
 	"github.com/filecoin-project/venus/pkg/vm"
 	cbor "github.com/ipfs/go-ipld-cbor"
 	"time"
@@ -24,8 +25,8 @@ import (
 )
 
 // ChainSubmodule enhances the `Node` with chain capabilities.
-type ChainSubmodule struct { //nolint
-	ChainReader  *chain.Store
+type ChainSubmodule struct { // nolint
+	ChainStore   *chain.Store
 	MessageStore *chain.MessageStore
 	Processor    *consensus.DefaultProcessor
 	Fork         fork.IFork
@@ -36,6 +37,7 @@ type ChainSubmodule struct { //nolint
 
 	config chainConfig
 
+	Stmgr *statemanger.Stmgr
 	// Wait for confirm message
 	Waiter *chain.Waiter
 }
@@ -52,22 +54,22 @@ func NewChainSubmodule(ctx context.Context,
 	config chainConfig,
 	circulatiingSupplyCalculator chain.ICirculatingSupplyCalcualtor,
 ) (*ChainSubmodule, error) {
-	repo := config.Repo()
+	repos := config.Repo()
 	// initialize chain store
-	chainStore := chain.NewStore(repo.ChainDatastore(), repo.Datastore(), config.GenesisCid(), circulatiingSupplyCalculator)
-	//drand
+	chainStore := chain.NewStore(repos.ChainDatastore(), repos.Datastore(), config.GenesisCid(), circulatiingSupplyCalculator)
+	// drand
 	genBlk, err := chainStore.GetGenesisBlock(context.TODO())
 	if err != nil {
 		return nil, err
 	}
 
-	drand, err := beacon.DrandConfigSchedule(genBlk.Timestamp, repo.Config().NetworkParams.BlockDelay, repo.Config().NetworkParams.DrandSchedule)
+	drand, err := beacon.DrandConfigSchedule(genBlk.Timestamp, repos.Config().NetworkParams.BlockDelay, repos.Config().NetworkParams.DrandSchedule)
 	if err != nil {
 		return nil, err
 	}
 
-	messageStore := chain.NewMessageStore(config.Repo().Datastore(), repo.Config().NetworkParams.ForkUpgradeParam)
-	fork, err := fork.NewChainFork(ctx, chainStore, cbor.NewCborStore(config.Repo().Datastore()), config.Repo().Datastore(), repo.Config().NetworkParams)
+	messageStore := chain.NewMessageStore(config.Repo().Datastore(), repos.Config().NetworkParams.ForkUpgradeParam)
+	fork, err := fork.NewChainFork(ctx, chainStore, cbor.NewCborStore(config.Repo().Datastore()), config.Repo().Datastore(), repos.Config().NetworkParams)
 	if err != nil {
 		return nil, err
 	}
@@ -78,7 +80,7 @@ func NewChainSubmodule(ctx context.Context,
 	waiter := chain.NewWaiter(chainStore, messageStore, config.Repo().Datastore(), cbor.NewCborStore(config.Repo().Datastore()))
 
 	store := &ChainSubmodule{
-		ChainReader:  chainStore,
+		ChainStore:   chainStore,
 		MessageStore: messageStore,
 		Processor:    processor,
 		SystemCall:   syscalls,
@@ -88,7 +90,7 @@ func NewChainSubmodule(ctx context.Context,
 		Waiter:       waiter,
 		CheckPoint:   chainStore.GetCheckPoint(),
 	}
-	err = store.ChainReader.Load(context.TODO())
+	err = store.ChainStore.Load(context.TODO())
 	if err != nil {
 		return nil, err
 	}
@@ -100,12 +102,12 @@ func (chain *ChainSubmodule) Start(ctx context.Context) error {
 	return chain.Fork.Start(ctx)
 }
 
-//Stop stop the chain head event
+// Stop stop the chain head event
 func (chain *ChainSubmodule) Stop(ctx context.Context) {
-	chain.ChainReader.Stop()
+	chain.ChainStore.Stop()
 }
 
-//API chain module api implement
+// API chain module api implement
 func (chain *ChainSubmodule) API() apiface.IChain {
 	return &chainAPI{
 		IAccount:    NewAccountAPI(chain),

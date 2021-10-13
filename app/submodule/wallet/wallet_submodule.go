@@ -4,8 +4,6 @@ import (
 	"context"
 
 	"github.com/filecoin-project/venus/app/client/apiface"
-	chain2 "github.com/filecoin-project/venus/pkg/chain"
-
 	logging "github.com/ipfs/go-log"
 	"github.com/pkg/errors"
 
@@ -22,12 +20,12 @@ import (
 var log = logging.Logger("wallet")
 
 // WalletSubmodule enhances the `Node` with a "wallet" and FIL transfer capabilities.
-type WalletSubmodule struct { //nolint
-	Wallet      *wallet.Wallet
-	ChainReader *chain2.Store
-	adapter     wallet.WalletIntersection
-	Signer      types.Signer
-	Config      *config.ConfigModule
+type WalletSubmodule struct { // nolint
+	Chain   *chain.ChainSubmodule
+	Wallet  *wallet.Wallet
+	adapter wallet.WalletIntersection
+	Signer  types.Signer
+	Config  *config.ConfigModule
 }
 
 type walletRepo interface {
@@ -50,7 +48,7 @@ func NewWalletSubmodule(ctx context.Context,
 		return nil, errors.Wrap(err, "failed to set up walletModule backend")
 	}
 	fcWallet := wallet.New(backend)
-	headSigner := state.NewHeadSignView(chain.ChainReader)
+	headSigner := state.NewHeadSignView(chain.ChainStore)
 
 	var adapter wallet.WalletIntersection
 	if repo.Config().Wallet.RemoteEnable {
@@ -66,15 +64,15 @@ func NewWalletSubmodule(ctx context.Context,
 		adapter = fcWallet
 	}
 	return &WalletSubmodule{
-		Config:      cfgModule,
-		ChainReader: chain.ChainReader,
-		Wallet:      fcWallet,
-		adapter:     adapter,
-		Signer:      state.NewSigner(headSigner, fcWallet),
+		Config:  cfgModule,
+		Chain:   chain,
+		Wallet:  fcWallet,
+		adapter: adapter,
+		Signer:  state.NewSigner(headSigner, fcWallet),
 	}, nil
 }
 
-//API create a new wallet api implement
+// API create a new wallet api implement
 func (wallet *WalletSubmodule) API() apiface.IWallet {
 	return &WalletAPI{
 		walletModule: wallet,
